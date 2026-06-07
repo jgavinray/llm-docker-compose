@@ -6,6 +6,9 @@
 #
 # Upstream serving notes:
 #   - vLLM >= 0.11.0 is required for GLM-4.5-Air support.
+#   - The default vLLM image is pinned to the linux/amd64 digest resolved from
+#     vllm/vllm-openai:nightly on 2026-06-07 because this NVFP4 checkpoint's
+#     model card currently requires nightly vLLM support.
 #   - hyper03 targets one NVIDIA RTX PRO 6000 Blackwell card with 96 GB GDDR7.
 #   - RTX PRO 6000 Blackwell has 5th-gen Tensor Cores with FP4 support. NVFP4 is
 #     selected to fit GLM-4.5-Air into this single-card memory envelope while
@@ -21,7 +24,7 @@
 
 services:
   vllm:
-    image: ${VLLM_IMAGE:-vllm/vllm-openai:nightly}
+    image: ${VLLM_IMAGE:-vllm/vllm-openai@sha256:d0f160a7391f574fdffdd0f8da13eea09c590b3b9651a2dba30b1d358ff942bb}
     container_name: vllm-glm45-air-nvfp4
     restart: unless-stopped
     network_mode: host
