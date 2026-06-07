@@ -2,13 +2,12 @@
 #
 # Default layout (override with GLM45_AIR_MODELS_DIR=/your/path docker compose up -d):
 #   /storage03/models/gemma4-31b/Gemma-4-31B-IT-NVFP4/
-#   /storage03/models/gemma4-31b/gemma-4-31B-it-assistant/
 #   /storage03/models/qwen36-27b/qwen3.6-27b-nvfp4/   <- optional local unsloth/Qwen3.6-27B-NVFP4 mirror
 #   /storage03/huggingface/                            <- Hugging Face cache
 #
 # Upstream serving notes:
-#   - Gemma 4 MTP support requires a Gemma4-capable vLLM nightly/image. The
-#     default image below tracks the vLLM Gemma4 CUDA 13.0 image for Blackwell.
+#   - The default image below tracks the vLLM Gemma4 CUDA 13.0 image for
+#     Blackwell.
 #   - hyper03 targets one NVIDIA RTX PRO 6000 Blackwell card with 96 GB GDDR7.
 #   - RTX PRO 6000 Blackwell has 5th-gen Tensor Cores with FP4 support. NVFP4 is
 #     selected for Gemma 4 31B to use the native low-precision path and fit
@@ -38,7 +37,6 @@ services:
       - CUDA_DEVICE_ORDER=PCI_BUS_ID
     volumes:
       - ${GEMMA4_31B_MODELS_DIR:-/storage03/models/gemma4-31b}/Gemma-4-31B-IT-NVFP4:/models/gemma-4-31b-nvfp4
-      - ${GEMMA4_31B_MODELS_DIR:-/storage03/models/gemma4-31b}/gemma-4-31B-it-assistant:/models/gemma-4-31b-it-assistant
       - ${HF_HOME:-/storage03/huggingface}:/root/.cache/huggingface
     command:
       - ${GEMMA4_31B_MODEL_PATH:-/models/gemma-4-31b-nvfp4}
@@ -61,7 +59,7 @@ services:
       - --max-num-batched-tokens
       - ${GEMMA4_31B_MAX_BATCHED_TOKENS:-65536}
       - --gpu-memory-utilization
-      - ${GEMMA4_31B_GPU_MEMORY_UTILIZATION:-0.45}
+      - ${GEMMA4_31B_GPU_MEMORY_UTILIZATION:-0.40}
       - --enable-chunked-prefill
       - --enable-prefix-caching
       - --load-format
@@ -75,8 +73,6 @@ services:
       - gemma4
       - --limit-mm-per-prompt
       - '{"image":0,"video":0,"audio":0}'
-      - --speculative-config
-      - '{"method":"mtp","model":"/models/gemma-4-31b-it-assistant","num_speculative_tokens":5}'
     ipc: host
     deploy:
       resources:
@@ -124,7 +120,7 @@ services:
       - --max-num-batched-tokens
       - ${QWEN36_27B_MAX_BATCHED_TOKENS:-65536}
       - --gpu-memory-utilization
-      - ${QWEN36_27B_GPU_MEMORY_UTILIZATION:-0.65}
+      - ${QWEN36_27B_GPU_MEMORY_UTILIZATION:-0.55}
       - --enable-chunked-prefill
       - --enable-prefix-caching
       - --load-format
