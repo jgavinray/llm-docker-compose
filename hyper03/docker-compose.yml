@@ -51,7 +51,7 @@ services:
       - --dtype
       - auto
       - --kv-cache-dtype
-      - ${GEMMA4_31B_KV_CACHE_DTYPE:-fp8}
+      - ${GEMMA4_31B_KV_CACHE_DTYPE:-nvfp4}
       - --max-model-len
       - ${GEMMA4_31B_MAX_MODEL_LEN:-65536}
       - --max-num-seqs
@@ -112,7 +112,7 @@ services:
       - --dtype
       - auto
       - --kv-cache-dtype
-      - ${QWEN36_27B_KV_CACHE_DTYPE:-fp8}
+      - ${QWEN36_27B_KV_CACHE_DTYPE:-nvfp4}
       - --max-model-len
       - ${QWEN36_27B_MAX_MODEL_LEN:-65536}
       - --max-num-seqs
