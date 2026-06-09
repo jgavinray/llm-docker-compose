@@ -43,6 +43,12 @@ services:
               capabilities: [gpu]
     restart: unless-stopped
     ipc: host
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()\""]
+      interval: 10s
+      timeout: 3s
+      retries: 120
+      start_period: 30s
     labels:
       lastloop.service.name: "hyper03-vllm-qwen36"
       lastloop.service.port: "${QWEN36_PORT:-8001}"
@@ -53,6 +59,9 @@ services:
     container_name: hyper03-llama-gemma4
     profiles:
       - llama
+    depends_on:
+      vllm:
+        condition: service_healthy
     ports:
       - "${GEMMA4_PORT:-8000}:8080"
     volumes:

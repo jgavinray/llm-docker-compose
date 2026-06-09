@@ -40,6 +40,10 @@ curl -fsS http://localhost:8001/health
 The vLLM service is built from the local `Dockerfile` and `entrypoint.sh`.
 Those files are part of this deployment, not optional boilerplate.
 
+Compose starts Qwen/vLLM first and waits for its healthcheck before starting
+Gemma/llama.cpp. This avoids vLLM profiling/warmup under Gemma's resident memory
+pressure.
+
 The legacy NVFP4/DFlash compose has been preserved as:
 
 ```text
