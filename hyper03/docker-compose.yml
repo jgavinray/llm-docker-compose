@@ -1,146 +1,100 @@
-# Gemma 4 31B NVFP4 and Qwen3.6-27B NVFP4 on hyper03
+# Production hybrid deployment for hyper03.
 #
-# Default layout (override with GLM45_AIR_MODELS_DIR=/your/path docker compose up -d):
-#   /storage03/models/gemma4-31b/Gemma-4-31B-IT-NVFP4/
-#   /storage03/models/qwen36-27b/qwen3.6-27b-nvfp4/   <- optional local unsloth/Qwen3.6-27B-NVFP4 mirror
-#   /storage03/huggingface/                            <- Hugging Face cache
+# Host:
+#   NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 96 GB VRAM
 #
-# Upstream serving notes:
-#   - The default image below tracks the vLLM Gemma4 CUDA 13.0 image for
-#     Blackwell.
-#   - hyper03 targets one NVIDIA RTX PRO 6000 Blackwell card with 96 GB GDDR7.
-#   - RTX PRO 6000 Blackwell has 5th-gen Tensor Cores with FP4 support. NVFP4 is
-#     selected for Gemma 4 31B to use the native low-precision path and fit
-#     alongside the Qwen service.
-#   - Gemma is capped at 65K context and one active sequence by default. The
-#     default GPU memory target is intentionally below the whole-card setting but
-#     still high enough to load the NVFP4 checkpoint plus a useful KV cache.
-#   - Qwen3.6-27B supports a native 262K context window, but the default here is
-#     capped at 65K and 4 active sequences to favor decode speed over maximum
-#     synthetic context capacity.
+# Validated layout:
+#   /storage03/models/Qwen3.6-27B-int4-AutoRound
+#   /storage03/models/gemma4-31b/gguf/gemma-4-31B-it-Q4_K_M.gguf
+#
+# Validated 2026-06-09:
+#   - Qwen/vLLM: 3 concurrent 131k-context sequences
+#   - Gemma/llama.cpp: 3 concurrent 131k-context slots
+#   - Both resident together: ~86 GB VRAM used, ~11 GB free
+#   - 5-wave mixed stress test, 30/30 outputs passed quality checks
+#   - Aggregate mixed throughput: ~166 completion tok/s
 
 services:
-  gemma:
-    image: ${GEMMA4_VLLM_IMAGE:-vllm/vllm-openai:gemma4-0505-cu130}
-    container_name: vllm-gemma4-31b-nvfp4
-    restart: unless-stopped
-    profiles:
-      - gemma
-    network_mode: host
-    environment:
-      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
-      - VLLM_USE_FLASHINFER_MOE_FP4=1
-      - VLLM_FLASHINFER_MOE_BACKEND=throughput
-      - TORCH_MATMUL_PRECISION=high
-      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-      - NVIDIA_FORWARD_COMPAT=1
-      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+  vllm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hyper03-vllm-qwen36
+    ports:
+      - "${QWEN36_PORT:-8001}:8000"
     volumes:
-      - ${GEMMA4_31B_MODELS_DIR:-/storage03/models/gemma4-31b}/Gemma-4-31B-IT-NVFP4:/models/gemma-4-31b-nvfp4
-      - ${HF_HOME:-/storage03/huggingface}:/root/.cache/huggingface
-    command:
-      - ${GEMMA4_31B_MODEL_PATH:-/models/gemma-4-31b-nvfp4}
-      - --served-model-name
-      - gemma-4-31b
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8000"
-      - --tensor-parallel-size
-      - ${GEMMA4_31B_TP_SIZE:-1}
-      - --dtype
-      - auto
-      - --kv-cache-dtype
-      - ${GEMMA4_31B_KV_CACHE_DTYPE:-nvfp4}
-      - --max-model-len
-      - ${GEMMA4_31B_MAX_MODEL_LEN:-65536}
-      - --max-num-seqs
-      - ${GEMMA4_31B_MAX_NUM_SEQS:-1}
-      - --max-num-batched-tokens
-      - ${GEMMA4_31B_MAX_BATCHED_TOKENS:-65536}
-      - --gpu-memory-utilization
-      - ${GEMMA4_31B_GPU_MEMORY_UTILIZATION:-0.40}
-      - --enable-chunked-prefill
-      - --enable-prefix-caching
-      - --load-format
-      - ${GEMMA4_31B_LOAD_FORMAT:-auto}
-      - --trust-remote-code
-      - --async-scheduling
-      - --enable-auto-tool-choice
-      - --tool-call-parser
-      - gemma4
-      - --reasoning-parser
-      - gemma4
-      - --limit-mm-per-prompt
-      - '{"image":0,"video":0,"audio":0}'
-    ipc: host
+      - ${MODELS_ROOT:-/storage03/models}:/models:ro
+      - ${VLLM_CACHE_DIR:-/storage03/vllm-docker-compose/hyper03/vllm-cache}:/root/.cache/vllm
+    environment:
+      - PORT=8000
+      - MODEL=${QWEN36_MODEL_PATH:-/models/Qwen3.6-27B-int4-AutoRound}
+      - MODEL_NAME=${QWEN36_MODEL_NAME:-qwen3.6-27b}
+      - MAX_MODEL_LEN=${QWEN36_MAX_MODEL_LEN:-131072}
+      - GPU_MEM_UTIL=${QWEN36_GPU_MEM_UTIL:-0.523}
+      - MAX_NUM_SEQS=${QWEN36_MAX_NUM_SEQS:-3}
+      - NUM_SPEC_TOKENS=${QWEN36_NUM_SPEC_TOKENS:-5}
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              device_ids: ["${CUDA_VISIBLE_DEVICES:-0}"]
               capabilities: [gpu]
+    restart: unless-stopped
+    ipc: host
+    labels:
+      lastloop.service.name: "hyper03-vllm-qwen36"
+      lastloop.service.port: "${QWEN36_PORT:-8001}"
+      lastloop.service.description: "Qwen3.6 27B AutoRound via patched vLLM, 3x131k, MTP, qwen3_xml tools"
 
-  qwen:
-    image: ${VLLM_IMAGE:-vllm/vllm-openai@sha256:d0f160a7391f574fdffdd0f8da13eea09c590b3b9651a2dba30b1d358ff942bb}
-    container_name: vllm-qwen36-27b-nvfp4
-    restart: unless-stopped
+  llama-cpp:
+    image: ${LLAMA_CPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda13-b9445}
+    container_name: hyper03-llama-gemma4
     profiles:
-      - qwen
-    network_mode: host
-    environment:
-      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
-      - VLLM_USE_FLASHINFER_MOE_FP4=1
-      - TORCH_MATMUL_PRECISION=high
-      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-      - NVIDIA_FORWARD_COMPAT=1
-      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      - llama
+    ports:
+      - "${GEMMA4_PORT:-8000}:8080"
     volumes:
-      - ${QWEN36_27B_MODELS_DIR:-/storage03/models/qwen36-27b}/qwen3.6-27b-nvfp4:/models/qwen3.6-27b-nvfp4
-      - ${HF_HOME:-/storage03/huggingface}:/root/.cache/huggingface
+      - ${MODELS_ROOT:-/storage03/models}:/models:ro
     command:
-      - ${QWEN36_27B_MODEL_PATH:-/models/qwen3.6-27b-nvfp4}
-      - --served-model-name
-      - qwen3.6-27b
+      - --model
+      - ${GEMMA4_GGUF_MODEL_PATH:-/models/gemma4-31b/gguf/gemma-4-31B-it-Q4_K_M.gguf}
+      - --alias
+      - ${GEMMA4_MODEL_ALIAS:-gemma-4-31b-q4-llamacpp}
       - --host
       - 0.0.0.0
       - --port
-      - "8001"
-      - --tensor-parallel-size
-      - ${QWEN36_27B_TP_SIZE:-1}
-      - --dtype
-      - auto
-      - --kv-cache-dtype
-      - ${QWEN36_27B_KV_CACHE_DTYPE:-nvfp4}
-      - --max-model-len
-      - ${QWEN36_27B_MAX_MODEL_LEN:-65536}
-      - --max-num-seqs
-      - ${QWEN36_27B_MAX_NUM_SEQS:-4}
-      - --max-num-batched-tokens
-      - ${QWEN36_27B_MAX_BATCHED_TOKENS:-65536}
-      - --gpu-memory-utilization
-      - ${QWEN36_27B_GPU_MEMORY_UTILIZATION:-0.55}
-      - --enable-chunked-prefill
-      - --enable-prefix-caching
-      - --load-format
-      - ${QWEN36_27B_LOAD_FORMAT:-auto}
-      - --trust-remote-code
-      - --async-scheduling
-      - --enable-auto-tool-choice
-      - --tool-call-parser
-      - ${QWEN36_27B_TOOL_CALL_PARSER:-qwen3_xml}
-      - --reasoning-parser
-      - qwen3
-      - --speculative-config.method
-      - mtp
-      - --speculative-config.num_speculative_tokens
-      - ${QWEN36_27B_SPECULATIVE_TOKENS:-3}
-    ipc: host
+      - "8080"
+      - --ctx-size
+      - ${GEMMA4_CTX_SIZE:-393216}
+      - --parallel
+      - ${GEMMA4_PARALLEL:-3}
+      - --n-gpu-layers
+      - ${GEMMA4_N_GPU_LAYERS:-999}
+      - --flash-attn
+      - "on"
+      - --cache-type-k
+      - ${GEMMA4_CACHE_TYPE_K:-q8_0}
+      - --cache-type-v
+      - ${GEMMA4_CACHE_TYPE_V:-q8_0}
+      - --jinja
+      - --reasoning-budget
+      - "0"
+      - --reasoning
+      - "off"
+    environment:
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              device_ids: ["${CUDA_VISIBLE_DEVICES:-0}"]
               capabilities: [gpu]
+    restart: unless-stopped
+    ipc: host
+    labels:
+      lastloop.service.name: "hyper03-llama-gemma4"
+      lastloop.service.port: "${GEMMA4_PORT:-8000}"
+      lastloop.service.description: "Gemma 4 31B Q4_K_M via llama.cpp, 3x131k slots, q8 KV"
