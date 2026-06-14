@@ -1,62 +1,142 @@
-# Production single-model deployment for hyper03.
+# Production dual-model deployment for hyper03.
 #
 # Host:
 #   NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 96 GB VRAM
 #
 # Target:
-#   Qwen3.5-122B-A10B via NVIDIA NVFP4 checkpoint and vLLM.
+#   - Qwen3.6-27B INT4 AutoRound as the primary local model
+#   - Qwen3-Next-80B-A3B-Thinking AWQ 4-bit as the deep reasoning model
 #
-# Rationale:
-#   - Official FP8 is too large for one 96 GB GPU once runtime/KV overhead is
-#     included.
-#   - GGUF can fit, but vLLM GGUF support is experimental and slower.
-#   - NVIDIA's NVFP4 checkpoint is built for vLLM on Blackwell and is the best
-#     fit here for high quality plus high decode throughput on one GPU.
+# Default sizing:
+#   - FP8 KV cache
+#   - 262k context for both models
+#   - 1 concurrent sequence per model
+#   - GPU memory caps sum to 0.95, weighted toward the 80B reasoning model
+#   - Sequential startup; vLLM memory profiling is not safe when both services
+#     allocate/release GPU memory during warmup at the same time.
+
+x-vllm-common: &vllm-common
+  restart: unless-stopped
+  ipc: host
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            device_ids: ["${CUDA_VISIBLE_DEVICES:-0}"]
+            capabilities: [gpu]
 
 services:
-  qwen35-122b:
+  qwen36-27b:
+    <<: *vllm-common
+    depends_on:
+      qwen3-next-80b-thinking:
+        condition: service_healthy
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hyper03-vllm-qwen36-27b
+    entrypoint:
+      - python3
+      - -m
+      - vllm.entrypoints.openai.api_server
+    ports:
+      - "${QWEN36_PORT:-8000}:8000"
+    volumes:
+      - ${MODELS_ROOT:-/storage03/models}:/models:ro
+      - ${VLLM_CACHE_DIR:-/storage03/vllm-docker-compose/hyper03/vllm-cache}/qwen36:/root/.cache/vllm
+    environment:
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      - VLLM_FLOAT32_MATMUL_PRECISION=high
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - OMP_NUM_THREADS=1
+      - CUDA_DEVICE_MAX_CONNECTIONS=8
+    command:
+      - --model
+      - ${QWEN36_MODEL_PATH:-/models/Qwen3.6-27B-int4-AutoRound}
+      - --served-model-name
+      - ${QWEN36_MODEL_NAME:-qwen3.6-27b}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --trust-remote-code
+      - --default-chat-template-kwargs
+      - '{"enable_thinking":false}'
+      - --quantization
+      - auto_round
+      - --kv-cache-dtype
+      - ${QWEN36_KV_CACHE_DTYPE:-fp8}
+      - --max-model-len
+      - ${QWEN36_MAX_MODEL_LEN:-262144}
+      - --gpu-memory-utilization
+      - ${QWEN36_GPU_MEM_UTIL:-0.35}
+      - --max-num-seqs
+      - ${QWEN36_MAX_NUM_SEQS:-1}
+      - --enable-prefix-caching
+      - --enable-prompt-tokens-details
+      - --enable-chunked-prefill
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_xml
+      - --language-model-only
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()"
+      interval: 10s
+      timeout: 3s
+      retries: 180
+      start_period: 120s
+    labels:
+      lastloop.service.name: "hyper03-vllm-qwen36-27b"
+      lastloop.service.port: "${QWEN36_PORT:-8000}"
+      lastloop.service.description: "Qwen3.6 27B INT4 AutoRound via patched vLLM, 1x262k, FP8 KV"
+
+  qwen3-next-80b-thinking:
+    <<: *vllm-common
     image: ${VLLM_IMAGE:-nvcr.io/nvidia/vllm:26.04-py3}
-    container_name: hyper03-vllm-qwen35-122b
+    container_name: hyper03-vllm-qwen3-next-80b-thinking
     entrypoint:
       - vllm
       - serve
     ports:
-      - "${QWEN35_122B_PORT:-8000}:8000"
+      - "${QWEN3_NEXT_80B_PORT:-8001}:8000"
     volumes:
-      - ${HF_HOME:-/storage03/models/huggingface}:/models/huggingface
-      - ${VLLM_CACHE_DIR:-/storage03/vllm-docker-compose/hyper03/vllm-cache}:/root/.cache/vllm
+      - ${MODELS_ROOT:-/storage03/models}:/models:ro
+      - ${VLLM_CACHE_DIR:-/storage03/vllm-docker-compose/hyper03/vllm-cache}/qwen3-next-80b:/root/.cache/vllm
       - ${TIKTOKEN_CACHE_DIR:-/storage03/vllm-docker-compose/hyper03/tiktoken-cache}:/root/.cache/tiktoken_cache
     environment:
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
-      - HF_HOME=/models/huggingface
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
       - TORCH_MATMUL_PRECISION=high
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
       - NVIDIA_FORWARD_COMPAT=1
       - CUDA_DEVICE_ORDER=PCI_BUS_ID
     command:
-      - ${QWEN35_122B_MODEL:-nvidia/Qwen3.5-122B-A10B-NVFP4}
+      - ${QWEN3_NEXT_80B_MODEL_PATH:-/models/Qwen3-Next-80B-A3B-Thinking-AWQ-4bit}
       - --served-model-name
-      - ${QWEN35_122B_MODEL_NAME:-qwen3.5-122b-a10b}
+      - ${QWEN3_NEXT_80B_MODEL_NAME:-qwen3-next-80b-a3b-thinking}
       - --host
       - 0.0.0.0
       - --port
       - "8000"
       - --trust-remote-code
-      - --quantization
-      - ${QWEN35_122B_QUANTIZATION:-modelopt_fp4}
       - --kv-cache-dtype
-      - ${QWEN35_122B_KV_CACHE_DTYPE:-fp8}
+      - ${QWEN3_NEXT_80B_KV_CACHE_DTYPE:-fp8}
       - --tensor-parallel-size
-      - ${QWEN35_122B_TP_SIZE:-1}
+      - ${QWEN3_NEXT_80B_TP_SIZE:-1}
       - --max-model-len
-      - ${QWEN35_122B_MAX_MODEL_LEN:-262144}
+      - ${QWEN3_NEXT_80B_MAX_MODEL_LEN:-262144}
       - --max-num-seqs
-      - ${QWEN35_122B_MAX_NUM_SEQS:-4}
+      - ${QWEN3_NEXT_80B_MAX_NUM_SEQS:-1}
       - --max-num-batched-tokens
-      - ${QWEN35_122B_MAX_BATCHED_TOKENS:-8192}
+      - ${QWEN3_NEXT_80B_MAX_BATCHED_TOKENS:-8192}
       - --gpu-memory-utilization
-      - ${QWEN35_122B_GPU_MEMORY_UTILIZATION:-0.92}
+      - ${QWEN3_NEXT_80B_GPU_MEMORY_UTILIZATION:-0.60}
       - --enable-prefix-caching
       - --prefix-caching-hash-algo
       - sha256
@@ -64,26 +144,20 @@ services:
       - --async-scheduling
       - --enable-auto-tool-choice
       - --tool-call-parser
-      - ${QWEN35_122B_TOOL_CALL_PARSER:-qwen3_coder}
+      - ${QWEN3_NEXT_80B_TOOL_CALL_PARSER:-qwen3_coder}
       - --reasoning-parser
       - qwen3
       - --language-model-only
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["${CUDA_VISIBLE_DEVICES:-0}"]
-              capabilities: [gpu]
-    restart: unless-stopped
-    ipc: host
     healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()\""]
+      test:
+        - CMD-SHELL
+        - >-
+          python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()"
       interval: 10s
       timeout: 3s
-      retries: 180
-      start_period: 120s
+      retries: 240
+      start_period: 180s
     labels:
-      lastloop.service.name: "hyper03-vllm-qwen35-122b"
-      lastloop.service.port: "${QWEN35_122B_PORT:-8000}"
-      lastloop.service.description: "Qwen3.5 122B-A10B NVFP4 via vLLM on one Blackwell GPU"
+      lastloop.service.name: "hyper03-vllm-qwen3-next-80b-thinking"
+      lastloop.service.port: "${QWEN3_NEXT_80B_PORT:-8001}"
+      lastloop.service.description: "Qwen3-Next 80B-A3B Thinking AWQ 4-bit via vLLM, 1x262k, FP8 KV"
