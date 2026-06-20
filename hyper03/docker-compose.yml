@@ -144,7 +144,7 @@ services:
       - --async-scheduling
       - --enable-auto-tool-choice
       - --tool-call-parser
-      - ${QWEN3_NEXT_80B_TOOL_CALL_PARSER:-qwen3_coder}
+      - ${QWEN3_NEXT_80B_TOOL_CALL_PARSER:-hermes}
       - --reasoning-parser
       - qwen3
       - --language-model-only
